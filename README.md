@@ -86,6 +86,10 @@ $env:NUM_EPOCHS="500"
 $env:NUM_WORKERS="2"
 ```
 
+## Hardware Note
+
+The default `192x192` input size is a reproducible setting chosen for the available training workstation, not a claim that larger sizes are invalid. The project machine used an NVIDIA GeForce RTX 4060 Ti with 16 GB VRAM, an Intel Core i3-14100F CPU, and 15 GiB system RAM. Larger settings such as `256x256` may require reducing batch size or using a GPU with more VRAM to avoid CUDA out-of-memory errors.
+
 Checkpoints are saved under `checkpoints/`:
 
 - `checkpoint_attention_gate.pth`

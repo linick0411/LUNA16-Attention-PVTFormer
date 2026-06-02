@@ -18,6 +18,23 @@ python -m py_compile <all repository python files>
 
 On the local Windows machine used to prepare this repo, `torch`, `timm`, `opencv-python`, `pandas`, `scikit-learn`, and `scipy` were installed. `albumentations` and `SimpleITK` were missing locally, so full training/preprocessing was not executed on the local machine during repo cleanup.
 
+## Training Hardware
+
+The prepared training workstation inspected for this project had:
+
+- GPU: NVIDIA GeForce RTX 4060 Ti
+- GPU memory: 16,380 MiB reported by `nvidia-smi`
+- CPU: Intel Core i3-14100F
+- CPU cores/threads: 4 cores / 8 threads
+- System memory: 15 GiB RAM, 23 GiB swap
+- OS: Ubuntu 24.04.3 LTS
+- NVIDIA driver: 580.126.20
+- CUDA version reported by `nvidia-smi`: 13.0
+
+The default `IMAGE_SIZE=192` and `BATCH_SIZE=16` are hardware-aware defaults. They were selected to keep the experiments runnable on this workstation and to avoid CUDA out-of-memory failures. If using `256x256` or larger input resolution, reduce `BATCH_SIZE` first or use a GPU with more VRAM.
+
+PyTorch version is intentionally not recorded here because the currently inspected remote shell did not expose a torch-installed Python environment. If you rerun experiments, record the exact Python/PyTorch/CUDA runtime used in the experiment log.
+
 ## Data
 
 Place the prepared data at `data/Task03_lung` or set:
