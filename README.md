@@ -114,6 +114,21 @@ results/coordinate_attention/
 
 Each output folder contains `mask/` predictions and `joint/` visual comparisons.
 
+## Visual Demo
+
+Use `demo_infer.py` to show one actual model prediction as report-ready images:
+
+```powershell
+python demo_infer.py `
+  --attention voxel_attention `
+  --checkpoint checkpoints/checkpoint_voxel_attention.pth `
+  --case-dir data/Task03_lung/nodule_0 `
+  --slice-index 5 `
+  --output-dir demo_outputs
+```
+
+The demo writes the center CT slice, probability heatmap, binary prediction mask, overlay, and a joint comparison image. See [docs/DEMO.md](docs/DEMO.md) for all options.
+
 ## References
 
 Key references are listed in [docs/REFERENCES.md](docs/REFERENCES.md) and [docs/REFERENCES.bib](docs/REFERENCES.bib). Also see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before redistributing derivative code.

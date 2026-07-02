@@ -6,12 +6,13 @@ import torch
 
 def load_pvtv2_b3_weights(backbone):
     """Load optional PVTv2-B3 ImageNet weights without requiring them in git."""
-    candidates = [
-        Path(os.environ.get("PVT_PRETRAINED_PATH", "")),
-        Path("checkpoints/pvt_v2_b3.pth"),
-        Path("pvt_v2_b3.pth"),
-    ]
-    weight_path = next((path for path in candidates if str(path) and path.exists()), None)
+    candidates = []
+    env_path = os.environ.get("PVT_PRETRAINED_PATH")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.extend([Path("checkpoints/pvt_v2_b3.pth"), Path("pvt_v2_b3.pth")])
+
+    weight_path = next((path for path in candidates if path.exists() and path.is_file()), None)
     if weight_path is None:
         print("Warning: PVTv2-B3 pretrained weights not found. Initializing backbone randomly.")
         return
