@@ -2,6 +2,26 @@
 
 `demo_infer.py` runs one trained model on one LUNA16 case or one manually selected CT slice stack. It creates images that can be used in reports, slides, or live demonstrations.
 
+## Quick Original-Project Demo
+
+The shortest project-ending demonstration uses the recovered original Attention
+Gate weight and automatically selects the largest annotated nodule slice from a
+test case:
+
+```bash
+./scripts/run_quick_legacy_demo.sh
+```
+
+The default case is `nodule_592`. To select another case:
+
+```bash
+./scripts/run_quick_legacy_demo.sh data/Task03_lung_sphere-v1/nodule_573
+```
+
+This is a visual demonstration of the recovered original-project model on the
+currently available `sphere-v1` data. It does not claim to recreate the missing
+report-era split and pseudo-mask build.
+
 ## Outputs
 
 For one selected center slice, the script writes:
@@ -11,6 +31,8 @@ For one selected center slice, the script writes:
 - `*_prediction.png`: binary predicted nodule mask.
 - `*_overlay.png`: predicted mask overlaid on the CT slice.
 - `*_joint.png`: side-by-side comparison. If a ground-truth mask is available, the joint image includes it.
+- `*_summary.json`: selected paths, checkpoint, threshold, and per-slice Dice,
+  IoU, Recall, and Precision when a reference mask is available.
 
 ## Attention Choices
 
@@ -21,6 +43,11 @@ attention_gate
 voxel_attention
 coordinate_attention
 ```
+
+`--weight-set legacy` selects the recovered original-project checkpoint for the
+chosen model. `--auto-positive` selects the slice with the largest available
+reference nodule mask. Omit it and pass `--slice-index` to demonstrate a chosen
+positive or background-only slice.
 
 Default checkpoints:
 

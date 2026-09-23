@@ -14,7 +14,7 @@ data/
 results/
 demo_outputs/
 logs/
-checkpoints/*.pth
+checkpoints/
 *.pth
 *.pt
 *.ckpt
@@ -29,3 +29,10 @@ checkpoints/*.pth
 
 .DS_Store
 Thumbs.db
+
+# Publish compact, reviewable experiment evidence while keeping generated
+# predictions, raw logs, datasets, and large checkpoints out of git.
+!results/
+results/*
+!results/published/
+!results/published/**

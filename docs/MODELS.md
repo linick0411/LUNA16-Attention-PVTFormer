@@ -1,6 +1,30 @@
 # Model Variants
 
-All three variants use the same basic pipeline:
+The experiment includes a 2D baseline, a plain 2.5D control, and three 2.5D attention variants.
+
+## PVTFormer Baseline
+
+Files:
+
+- `train_baseline.py`
+- `eval_baseline.py`
+- `model_baseline.py`
+
+This is the upstream PVTFormer encoder-decoder adapted to the shared loader, checkpoint, and evaluation code. It receives only the center CT slice, repeated as three RGB channels. It provides the control condition needed to measure whether neighboring slices and the added attention mechanisms improve the result.
+
+## Plain 2.5D Concatenation Control
+
+Files:
+
+- `train_concat_25d.py`
+- `eval_concat_25d.py`
+- `model_concat_25d.py`
+
+This model uses the same previous, center, and next slices as the attention variants, then concatenates each encoder level and reduces it with a 1x1 convolution. It adds no attention mechanism. Comparing it with the 2D baseline isolates the value of neighboring slices; comparing it with the attention variants isolates the added attention design.
+
+## Shared 2.5D Pipeline
+
+All three attention variants use the same basic pipeline:
 
 - CT input is prepared as 2.5D slices: previous, center, next.
 - Each grayscale slice is repeated internally to 3 channels because PVTv2 is an RGB-pretrained backbone.
@@ -67,8 +91,4 @@ Shared settings:
 - Augmentation: rotation, horizontal flip, vertical flip, coarse dropout
 - Metrics: Jaccard, F1, Recall, Precision, Accuracy, F2, HD, AUC
 
-Default early stopping patience:
-
-- Attention Gate: `50`
-- Voxel Attention: `50`
-- Coordinate Attention: `20`
+Both controls and all three attention variants use an early stopping patience of `50` epochs so that the comparison uses the same stopping rule.

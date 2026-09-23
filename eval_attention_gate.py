@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from eval_common import EvaluationConfig, run_evaluation
@@ -10,6 +11,6 @@ if __name__ == "__main__":
         EvaluationConfig(
             model_name="attention_gate",
             checkpoint_name="checkpoint_attention_gate.pth",
-            output_dir=Path("results/attention_gate"),
+            output_dir=Path(os.environ.get("RESULTS_DIR", "results")) / "attention_gate",
         ),
     )

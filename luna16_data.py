@@ -1,5 +1,5 @@
 import os
-from glob import glob
+import csv
 from pathlib import Path
 
 import cv2
@@ -8,14 +8,33 @@ from torch.utils.data import Dataset
 
 
 DEFAULT_DATA_DIR = Path(os.environ.get("LUNA16_TASK_DIR", "data/Task03_lung"))
+SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+
+
+def _slice_index(path):
+    stem = Path(path).stem
+    try:
+        return (0, int(stem.rsplit("_", 1)[-1]))
+    except ValueError:
+        return (1, stem)
+
+
+def _media_by_stem(directory):
+    files = [path for path in Path(directory).iterdir() if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES]
+    result = {}
+    for path in files:
+        if path.stem in result:
+            raise ValueError(f"Duplicate slice stem under {directory}: {path.stem}")
+        result[path.stem] = str(path)
+    return result
 
 
 def _nodule_index(path):
     name = Path(path).name
     try:
-        return int(name.split("_", 1)[1])
+        return (0, int(name.split("_", 1)[1]))
     except (IndexError, ValueError):
-        return name
+        return (1, name)
 
 
 def load_data(path=DEFAULT_DATA_DIR):
@@ -29,17 +48,45 @@ def load_data(path=DEFAULT_DATA_DIR):
 
     def get_data(name):
         nodule_dir = root / name
-        images = sorted(glob(str(nodule_dir / "images" / "*.jpg")))
-        masks = sorted(glob(str(nodule_dir / "masks" / "nodule" / "*.jpg")))
-        return images, masks
+        image_dir = nodule_dir / "images"
+        mask_dir = nodule_dir / "masks" / "nodule"
+        if not image_dir.exists() or not mask_dir.exists():
+            return [], []
+
+        images = _media_by_stem(image_dir)
+        masks = _media_by_stem(mask_dir)
+        if images.keys() != masks.keys():
+            missing_masks = sorted(images.keys() - masks.keys())[:5]
+            missing_images = sorted(masks.keys() - images.keys())[:5]
+            raise ValueError(
+                f"Image/mask filename mismatch under {nodule_dir}. "
+                f"Missing masks: {missing_masks}; missing images: {missing_images}"
+            )
+
+        stems = sorted(images, key=lambda stem: _slice_index(stem))
+        return [images[stem] for stem in stems], [masks[stem] for stem in stems]
 
     dirs = sorted(
         [item.name for item in root.iterdir() if item.is_dir() and item.name.startswith("nodule_")],
         key=_nodule_index,
     )
-    test_names = [f"nodule_{i}" for i in range(0, 30)]
-    valid_names = [f"nodule_{i}" for i in range(30, 60)]
-    train_names = [item for item in dirs if item not in set(test_names + valid_names)]
+    manifest_path = root / "case_manifest.csv"
+    if manifest_path.exists():
+        with manifest_path.open(newline="", encoding="utf-8") as manifest_file:
+            rows = list(csv.DictReader(manifest_file))
+        manifest_names = [row["case_name"] for row in rows]
+        if manifest_names != dirs:
+            raise ValueError("case_manifest.csv does not exactly match Task03_lung folders")
+        invalid_splits = [row for row in rows if row.get("split") not in {"train", "validation", "test"}]
+        if invalid_splits:
+            raise ValueError("case_manifest.csv contains a missing or invalid split")
+        train_names = [row["case_name"] for row in rows if row["split"] == "train"]
+        valid_names = [row["case_name"] for row in rows if row["split"] == "validation"]
+        test_names = [row["case_name"] for row in rows if row["split"] == "test"]
+    else:
+        test_names = [f"nodule_{i}" for i in range(0, 30)]
+        valid_names = [f"nodule_{i}" for i in range(30, 60)]
+        train_names = [item for item in dirs if item not in set(test_names + valid_names)]
 
     splits = []
     for names in (train_names, valid_names, test_names):

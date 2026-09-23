@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from eval_common import EvaluationConfig, run_evaluation
@@ -10,6 +11,6 @@ if __name__ == "__main__":
         EvaluationConfig(
             model_name="voxel_attention",
             checkpoint_name="checkpoint_voxel_attention.pth",
-            output_dir=Path("results/voxel_attention"),
+            output_dir=Path(os.environ.get("RESULTS_DIR", "results")) / "voxel_attention",
         ),
     )

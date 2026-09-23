@@ -1,5 +1,8 @@
 import datetime
+import csv
+import json
 import os
+import platform
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,8 +14,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from luna16_data import DEFAULT_DATA_DIR, LUNA16SliceDataset, load_data
-from metrics import DiceBCELoss
-from utils import calculate_metrics, create_dir, epoch_time, print_and_save, seeding, shuffling
+from metrics import DiceBCELoss, metrics_from_confusion
+from utils import create_dir, epoch_time, print_and_save, seeding, shuffling
 
 
 @dataclass
@@ -30,44 +33,79 @@ class TrainingConfig:
     early_stopping_patience: int = 50
     num_workers: int = int(os.environ.get("NUM_WORKERS", "2"))
     use_25d: bool = os.environ.get("USE_25D", "1") != "0"
+    use_amp: bool = os.environ.get("USE_AMP", "1") != "0"
     seed: int = int(os.environ.get("SEED", "42"))
 
 
-def _collect_metrics(y, y_pred):
-    batch_scores = [calculate_metrics(yt, yp) for yt, yp in zip(y, y_pred)]
-    return np.mean(batch_scores, axis=0)
+def _batch_counts(y, y_pred):
+    true = y > 0.5
+    predicted = y_pred > 0.5
+    counts = torch.stack(
+        [
+            torch.count_nonzero(true & predicted),
+            torch.count_nonzero(~true & predicted),
+            torch.count_nonzero(~true & ~predicted),
+            torch.count_nonzero(true & ~predicted),
+        ]
+    )
+    return counts.detach().cpu().numpy().astype(np.float64)
 
 
-def train_one_epoch(model, loader, optimizer, loss_fn, device):
+def _four_metrics(counts):
+    summary = metrics_from_confusion(counts)
+    return [summary[name] for name in ("jaccard", "f1", "recall", "precision")]
+
+
+def _atomic_torch_save(payload, path):
+    path = Path(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, temporary)
+    os.replace(temporary, path)
+
+
+def train_one_epoch(model, loader, optimizer, loss_fn, device, scaler=None, use_amp=False):
     model.train()
     epoch_loss = 0.0
-    epoch_metrics = np.zeros(4, dtype=np.float64)
+    epoch_counts = np.zeros(4, dtype=np.float64)
+    sample_count = 0
 
     pbar = tqdm(loader, desc="Training", leave=False)
     for x, y in pbar:
         x = x.to(device, dtype=torch.float32)
         y = y.to(device, dtype=torch.float32)
 
-        optimizer.zero_grad()
-        logits = model(x)
-        loss = loss_fn(logits, y)
-        loss.backward()
-        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+            logits = model(x)
+            loss = loss_fn(logits, y)
+        if not torch.isfinite(loss):
+            raise RuntimeError(f"Non-finite training loss detected: {loss.detach().item()}")
+        if scaler is None:
+            loss.backward()
+            optimizer.step()
+        else:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
         y_pred = torch.sigmoid(logits)
-        batch_metrics = _collect_metrics(y, y_pred)[:4]
+        batch_counts = _batch_counts(y, y_pred)
+        batch_metrics = _four_metrics(batch_counts)
 
-        epoch_loss += loss.item()
-        epoch_metrics += batch_metrics
+        batch_size = x.shape[0]
+        epoch_loss += loss.item() * batch_size
+        epoch_counts += batch_counts
+        sample_count += batch_size
         pbar.set_postfix({"Loss": f"{loss.item():.4f}", "F1": f"{batch_metrics[1]:.4f}"})
 
-    return epoch_loss / len(loader), (epoch_metrics / len(loader)).tolist()
+    return epoch_loss / sample_count, _four_metrics(epoch_counts)
 
 
-def evaluate_one_epoch(model, loader, loss_fn, device):
+def evaluate_one_epoch(model, loader, loss_fn, device, use_amp=False):
     model.eval()
     epoch_loss = 0.0
-    epoch_metrics = np.zeros(4, dtype=np.float64)
+    epoch_counts = np.zeros(4, dtype=np.float64)
+    sample_count = 0
 
     pbar = tqdm(loader, desc="Validating", leave=False)
     with torch.no_grad():
@@ -75,16 +113,22 @@ def evaluate_one_epoch(model, loader, loss_fn, device):
             x = x.to(device, dtype=torch.float32)
             y = y.to(device, dtype=torch.float32)
 
-            logits = model(x)
-            loss = loss_fn(logits, y)
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+                logits = model(x)
+                loss = loss_fn(logits, y)
+            if not torch.isfinite(loss):
+                raise RuntimeError(f"Non-finite validation loss detected: {loss.detach().item()}")
             y_pred = torch.sigmoid(logits)
-            batch_metrics = _collect_metrics(y, y_pred)[:4]
+            batch_counts = _batch_counts(y, y_pred)
+            batch_metrics = _four_metrics(batch_counts)
 
-            epoch_loss += loss.item()
-            epoch_metrics += batch_metrics
+            batch_size = x.shape[0]
+            epoch_loss += loss.item() * batch_size
+            epoch_counts += batch_counts
+            sample_count += batch_size
             pbar.set_postfix({"Loss": f"{loss.item():.4f}", "F1": f"{batch_metrics[1]:.4f}"})
 
-    return epoch_loss / len(loader), (epoch_metrics / len(loader)).tolist()
+    return epoch_loss / sample_count, _four_metrics(epoch_counts)
 
 
 def run_training(model_factory, config):
@@ -94,8 +138,30 @@ def run_training(model_factory, config):
 
     checkpoint_path = config.checkpoints_dir / config.checkpoint_name
     train_log_path = config.logs_dir / config.train_log_name
+    run_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    history_path = config.logs_dir / f"history_{config.model_name}_{run_id}.csv"
+    metadata_path = config.logs_dir / f"run_{config.model_name}_{run_id}.json"
     if not train_log_path.exists():
         train_log_path.write_text("", encoding="utf-8")
+
+    with history_path.open("x", newline="", encoding="utf-8") as history_file:
+        writer = csv.writer(history_file)
+        writer.writerow(
+            [
+                "epoch",
+                "train_loss",
+                "train_jaccard",
+                "train_f1",
+                "train_recall",
+                "train_precision",
+                "valid_loss",
+                "valid_jaccard",
+                "valid_f1",
+                "valid_recall",
+                "valid_precision",
+                "learning_rate",
+            ]
+        )
 
     size = (config.image_size, config.image_size)
     print_and_save(str(train_log_path), str(datetime.datetime.now()))
@@ -109,9 +175,31 @@ def run_training(model_factory, config):
             f"LR: {config.lr}\n"
             f"Epochs: {config.num_epochs}\n"
             f"Early Stopping Patience: {config.early_stopping_patience}\n"
-            f"Use 2.5D: {config.use_25d}"
+            f"Use 2.5D: {config.use_25d}\n"
+            f"Use AMP: {config.use_amp and torch.cuda.is_available()}"
         ),
     )
+
+    metadata = {
+        "run_id": run_id,
+        "model": config.model_name,
+        "data_dir": str(config.data_dir),
+        "dataset_version": os.environ.get("DATASET_VERSION"),
+        "image_size": config.image_size,
+        "batch_size": config.batch_size,
+        "num_epochs": config.num_epochs,
+        "learning_rate": config.lr,
+        "early_stopping_patience": config.early_stopping_patience,
+        "num_workers": config.num_workers,
+        "use_25d": config.use_25d,
+        "use_amp": config.use_amp and torch.cuda.is_available(),
+        "seed": config.seed,
+        "python_version": platform.python_version(),
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     (train_x, train_y), (valid_x, valid_y), (test_x, test_y) = load_data(config.data_dir)
     if len(train_x) == 0 or len(valid_x) == 0:
@@ -142,12 +230,16 @@ def run_training(model_factory, config):
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=config.num_workers > 0,
     )
     valid_loader = DataLoader(
         valid_dataset,
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=config.num_workers > 0,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -155,16 +247,51 @@ def run_training(model_factory, config):
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=5)
     loss_fn = DiceBCELoss()
+    amp_enabled = config.use_amp and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=True) if amp_enabled else None
     print_and_save(str(train_log_path), "Optimizer: Adam\nLoss: BCE Dice Loss")
 
-    best_valid_f1 = 0.0
+    best_valid_f1 = float("-inf")
     early_stopping_count = 0
-    epoch_pbar = tqdm(range(config.num_epochs), desc="Epochs", unit="epoch")
+
+    start_epoch = 0
+    resume_path = os.environ.get("TRAIN_RESUME_PATH")
+    state_path = checkpoint_path.with_suffix(".last.pt")
+    completion_path = checkpoint_path.with_suffix(".complete.json")
+    if resume_path:
+        payload = torch.load(resume_path, map_location=device, weights_only=False)
+        if isinstance(payload, dict) and "model_state" in payload:
+            model.load_state_dict(payload["model_state"], strict=True)
+            optimizer.load_state_dict(payload["optimizer"])
+            scheduler.load_state_dict(payload["scheduler"])
+            if scaler is not None and payload["scaler"] is not None:
+                scaler.load_state_dict(payload["scaler"])
+            best_valid_f1 = payload["best_valid_f1"]
+            early_stopping_count = payload["early_stopping_count"]
+            start_epoch = payload["epoch"]
+            resume_kind = "training_state_resume"
+        else:
+            model.load_state_dict(payload, strict=True)
+            _, initial_metrics = evaluate_one_epoch(model, valid_loader, loss_fn, device, use_amp=amp_enabled)
+            best_valid_f1 = initial_metrics[1]
+            resume_kind = "weights_only_warm_restart"
+            if not checkpoint_path.exists():
+                _atomic_torch_save(model.state_dict(), checkpoint_path)
+        metadata.update(resume_source=str(resume_path), resume_kind=resume_kind,
+                        start_epoch=start_epoch, initial_best_valid_f1=best_valid_f1,
+                        exact_random_stream_resume=False)
+        metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        print_and_save(str(train_log_path), f"Resume: {resume_kind}; source={resume_path}; initial best F1={best_valid_f1:.8f}")
+    epoch_pbar = tqdm(range(start_epoch, config.num_epochs), desc="Epochs", unit="epoch")
 
     for epoch in epoch_pbar:
         start_time = time.time()
-        train_loss, train_metrics = train_one_epoch(model, train_loader, optimizer, loss_fn, device)
-        valid_loss, valid_metrics = evaluate_one_epoch(model, valid_loader, loss_fn, device)
+        train_loss, train_metrics = train_one_epoch(
+            model, train_loader, optimizer, loss_fn, device, scaler=scaler, use_amp=amp_enabled
+        )
+        valid_loss, valid_metrics = evaluate_one_epoch(
+            model, valid_loader, loss_fn, device, use_amp=amp_enabled
+        )
         scheduler.step(valid_loss)
         current_lr = optimizer.param_groups[0]["lr"]
 
@@ -175,7 +302,7 @@ def run_training(model_factory, config):
                 f"Saving checkpoint: {checkpoint_path}",
             )
             best_valid_f1 = valid_metrics[1]
-            torch.save(model.state_dict(), checkpoint_path)
+            _atomic_torch_save(model.state_dict(), checkpoint_path)
             early_stopping_count = 0
         else:
             early_stopping_count += 1
@@ -206,9 +333,37 @@ def run_training(model_factory, config):
         log += f"\tLearning Rate: {current_lr:.2e}\n"
         print_and_save(str(train_log_path), log)
 
+        with history_path.open("a", newline="", encoding="utf-8") as history_file:
+            csv.writer(history_file).writerow(
+                [
+                    epoch + 1,
+                    train_loss,
+                    *train_metrics,
+                    valid_loss,
+                    *valid_metrics,
+                    current_lr,
+                ]
+            )
+
+
+        _atomic_torch_save({
+            "model_state": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "scaler": scaler.state_dict() if scaler is not None else None,
+            "epoch": epoch + 1, "best_valid_f1": best_valid_f1,
+            "early_stopping_count": early_stopping_count,
+            "model_name": config.model_name,
+        }, state_path)
         if early_stopping_count >= config.early_stopping_patience:
             print_and_save(
                 str(train_log_path),
                 f"Early stopping: validation F1 did not improve for {config.early_stopping_patience} epochs.",
             )
             break
+
+
+    completion_path.write_text(json.dumps({"model": config.model_name, "best_valid_f1": best_valid_f1,
+                                          "history": str(history_path), "resume_source": resume_path}), encoding="utf-8")
+    print_and_save(str(train_log_path), f"History CSV: {history_path}")
+    print_and_save(str(train_log_path), f"Run metadata: {metadata_path}")

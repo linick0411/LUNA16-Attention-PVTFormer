@@ -1,0 +1,28 @@
+{
+  "check_pixels": true,
+  "empty_mask_count": 34371,
+  "folder_count": 601,
+  "image_count": 44550,
+  "manifest_cases": 601,
+  "manifest_source_uids": 601,
+  "mask_count": 44550,
+  "non_binary_mask_count": 0,
+  "root": "data/Task03_lung_sphere-v1",
+  "slice_order_validation": {
+    "cases_checked": 601,
+    "content_sample_cases": [
+      "nodule_25",
+      "nodule_114",
+      "nodule_281"
+    ],
+    "content_sample_slices": 437,
+    "original_z_index_rule": "first_kept_slice + exported_slice_index",
+    "slices_checked": 44550,
+    "status": "passed"
+  },
+  "splits": {
+    "test": 4076,
+    "train": 35777,
+    "validation": 4697
+  }
+}

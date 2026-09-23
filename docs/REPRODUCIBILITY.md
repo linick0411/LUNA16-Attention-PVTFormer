@@ -10,17 +10,18 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Local syntax validation was run with:
+The current reproduction environment is an isolated WSL project virtual environment. Validation was run with:
 
 ```powershell
-python -m py_compile <all repository python files>
+python -m pytest tests -q
+python -m py_compile <changed repository Python files>
 ```
 
-On the local Windows machine used to prepare this repo, `torch`, `timm`, `opencv-python`, `pandas`, `scikit-learn`, and `scipy` were installed. `albumentations` and `SimpleITK` were missing locally, so full training/preprocessing was not executed on the local machine during repo cleanup.
+The verified runtime is Python 3.10.12, PyTorch 2.14.0 with CUDA 13.0, and an NVIDIA GeForce RTX 5070 Ti with 15.92 GiB reported memory. CUDA tensor execution and forward passes for the baseline and all three attention variants completed successfully. The corrected `sphere-v1` preprocessing, five-model training, and fixed-contract evaluation have completed; compact evidence is published under `results/published/sphere-v1`.
 
 ## Training Hardware
 
-The prepared training workstation inspected for this project had:
+The historical project workstation had:
 
 - GPU: NVIDIA GeForce RTX 4060 Ti
 - GPU memory: 16,380 MiB reported by `nvidia-smi`
@@ -33,7 +34,7 @@ The prepared training workstation inspected for this project had:
 
 The default `IMAGE_SIZE=192` and `BATCH_SIZE=16` are hardware-aware defaults. They were selected to keep the experiments runnable on this workstation and to avoid CUDA out-of-memory failures. If using `256x256` or larger input resolution, reduce `BATCH_SIZE` first or use a GPU with more VRAM.
 
-PyTorch version is intentionally not recorded here because the currently inspected remote shell did not expose a torch-installed Python environment. If you rerun experiments, record the exact Python/PyTorch/CUDA runtime used in the experiment log.
+The rebuilt local environment uses the RTX 5070 Ti described above. Every new training run writes its exact Python, PyTorch, CUDA, and device settings into a JSON run record.
 
 ## Data
 
@@ -59,7 +60,7 @@ or set:
 $env:PVT_PRETRAINED_PATH="D:\weights\pvt_v2_b3.pth"
 ```
 
-Training still runs without the pretrained weights, but the backbone will initialize randomly and results will not match pretrained experiments.
+Comparable training stops with a clear error if pretrained weights are missing or incompatible. Set `ALLOW_RANDOM_BACKBONE=1` only for an explicitly non-comparable smoke test.
 
 ## Commands
 
@@ -69,6 +70,7 @@ Train:
 python train_attention_gate.py
 python train_voxel_attention.py
 python train_coordinate_attention.py
+python train_baseline.py
 ```
 
 Evaluate:
@@ -77,6 +79,7 @@ Evaluate:
 python eval_attention_gate.py
 python eval_voxel_attention.py
 python eval_coordinate_attention.py
+python eval_baseline.py
 ```
 
 Common overrides:
@@ -87,7 +90,10 @@ $env:BATCH_SIZE="16"
 $env:NUM_EPOCHS="500"
 $env:NUM_WORKERS="2"
 $env:CHECKPOINT_DIR="checkpoints"
+$env:USE_AMP="1"
 ```
+
+CUDA training and evaluation use automatic mixed precision by default to reduce memory use and runtime. Set `USE_AMP=0` for a full-float diagnostic run. The selected mode is recorded in every run and evaluation JSON file.
 
 ## Expected Outputs
 
@@ -100,6 +106,7 @@ logs/train_log_coordinate_attention.txt
 checkpoints/checkpoint_attention_gate.pth
 checkpoints/checkpoint_voxel_attention.pth
 checkpoints/checkpoint_coordinate_attention.pth
+checkpoints/checkpoint_baseline.pth
 ```
 
 Evaluation:
@@ -111,10 +118,15 @@ results/voxel_attention/mask
 results/voxel_attention/joint
 results/coordinate_attention/mask
 results/coordinate_attention/joint
+results/baseline/mask
+results/baseline/joint
 ```
 
 ## Metric Notes
 
+- Jaccard, F1/Dice, Recall, Precision, Accuracy, and F2 use dataset-level micro aggregation over TP/FP/TN/FN. This prevents empty background slices from receiving free perfect overlap scores and inflating the mean.
 - AUC is computed pixel-wise from predicted probabilities and binary mask labels.
-- HD is computed from the current project implementation in `metrics.py`.
+- HD is the symmetric Hausdorff distance between foreground-pixel coordinates and
+  is reported in resized-image pixels. Empty/empty slices are excluded; a false-positive-only slice receives the resized image diagonal as its penalty. The evaluator records the number of contributing slices.
+- The evaluator also records the false-positive rate among ground-truth-negative slices.
 - Because LUNA16 labels are converted from center/diameter annotations into coarse masks, metric values should be interpreted as experiment-comparison signals, not clinical validation.

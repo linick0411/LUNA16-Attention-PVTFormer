@@ -1,0 +1,35 @@
+{
+  "files": [
+    {
+      "bytes": 182344883,
+      "file": "checkpoint_baseline.pth",
+      "model": "baseline",
+      "sha256": "044d751a09480beabf3fc606566b66eef356ddef212b6bc817322f7dd77fdf78"
+    },
+    {
+      "bytes": 183825259,
+      "file": "checkpoint_concat_25d.pth",
+      "model": "concat_25d",
+      "sha256": "a2dbfa158c6fc0ee5a880d6e0c29eccbcabffcf42155211db521952f61679cb1"
+    },
+    {
+      "bytes": 183877115,
+      "file": "checkpoint_attention_gate.pth",
+      "model": "attention_gate",
+      "sha256": "c3d2b5949cfb02d85c4b46b225343f0f841e98aab1e4d1e83ab0356c2754f21f"
+    },
+    {
+      "bytes": 196141724,
+      "file": "checkpoint_voxel_attention.pth",
+      "model": "voxel_attention",
+      "sha256": "fc79d9b3bae3308921c47a7c9195d2b0b7739bd9a970e70c8be29709a92e859b"
+    },
+    {
+      "bytes": 184070913,
+      "file": "checkpoint_coordinate_attention.pth",
+      "model": "coordinate_attention",
+      "sha256": "ac755e2cdd51ad09fe183d1c43d30657418db989cdbb3bcc50641db5df28391b"
+    }
+  ],
+  "storage": "Weights are intentionally excluded from Git because each file is larger than GitHub's 100 MB per-file limit."
+}

@@ -1,16 +1,19 @@
 import os
+import json
+import platform
 import time
 from dataclasses import dataclass
-from operator import add
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
+from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
 from luna16_data import DEFAULT_DATA_DIR, load_data
-from utils import calculate_metrics, create_dir, seeding
+from metrics import confusion_counts, hd_dist, metrics_from_confusion
+from utils import create_dir, seeding
 
 
 @dataclass
@@ -22,6 +25,7 @@ class EvaluationConfig:
     checkpoints_dir: Path = Path(os.environ.get("CHECKPOINT_DIR", "checkpoints"))
     image_size: int = int(os.environ.get("IMAGE_SIZE", "192"))
     use_25d: bool = os.environ.get("USE_25D", "1") != "0"
+    use_amp: bool = os.environ.get("USE_AMP", "1") != "0"
     seed: int = int(os.environ.get("SEED", "42"))
 
 
@@ -54,22 +58,44 @@ def _process_prediction(y_pred):
     return np.concatenate([y_pred, y_pred, y_pred], axis=2)
 
 
-def _print_score(metrics_score, num_samples):
-    jaccard = metrics_score[0] / num_samples
-    f1 = metrics_score[1] / num_samples
-    recall = metrics_score[2] / num_samples
-    precision = metrics_score[3] / num_samples
-    acc = metrics_score[4] / num_samples
-    f2 = metrics_score[5] / num_samples
-    hd = metrics_score[6] / num_samples
-    auc_count = metrics_score[8]
-    auc = metrics_score[7] / auc_count if auc_count > 0 else float("nan")
-
+def _print_score(summary):
     print(
-        f"Jaccard: {jaccard:1.4f} - F1: {f1:1.4f} - Recall: {recall:1.4f} - "
-        f"Precision: {precision:1.4f} - Acc: {acc:1.4f} - F2: {f2:1.4f} - "
-        f"HD: {hd:1.4f} - AUC: {auc:1.4f}"
+        f"Jaccard: {summary['jaccard']:1.4f} - F1: {summary['f1']:1.4f} - "
+        f"Recall: {summary['recall']:1.4f} - Precision: {summary['precision']:1.4f} - "
+        f"Acc: {summary['accuracy']:1.4f} - F2: {summary['f2']:1.4f} - "
+        f"HD: {summary['hausdorff_pixels'] if summary['hausdorff_pixels'] is not None else 'N/A'} - "
+        f"AUC: {summary['auc'] if summary['auc'] is not None else 'N/A'}"
     )
+
+
+def _update_diagnostics(y_true, y_score, valid, diagnostics):
+    y_true = np.asarray(y_true) > 0.5
+    y_score = np.asarray(y_score, dtype=np.float32)
+    valid = np.asarray(valid) > 0.5
+    y_pred = y_score > 0.5
+
+    diagnostics["counts"] += confusion_counts(y_true, y_pred, valid_mask=valid)
+    true_valid = y_true & valid
+    pred_valid = y_pred & valid
+    has_true = bool(np.any(true_valid))
+    has_pred = bool(np.any(pred_valid))
+
+    if has_true:
+        diagnostics["positive_slices"] += 1
+    else:
+        diagnostics["negative_slices"] += 1
+        if has_pred:
+            diagnostics["negative_slices_with_false_positive"] += 1
+
+    if has_true or has_pred:
+        diagnostics["hausdorff_sum"] += hd_dist(true_valid, pred_valid)
+        diagnostics["hausdorff_count"] += 1
+
+    true_flat = y_true[valid]
+    score_flat = y_score[valid]
+    if true_flat.size and np.unique(true_flat).size == 2:
+        diagnostics["auc_sum"] += roc_auc_score(true_flat.astype(np.uint8), score_flat)
+        diagnostics["auc_count"] += 1
 
 
 def _load_ignore_mask(mask_path, size):
@@ -103,7 +129,16 @@ def run_evaluation(model_factory, config):
     if len(test_x) == 0:
         raise RuntimeError(f"Test split is empty. Check data directory: {config.data_dir}")
 
-    metrics_score = [0.0] * 9
+    diagnostics = {
+        "counts": np.zeros(4, dtype=np.float64),
+        "hausdorff_sum": 0.0,
+        "hausdorff_count": 0,
+        "auc_sum": 0.0,
+        "auc_count": 0,
+        "positive_slices": 0,
+        "negative_slices": 0,
+        "negative_slices_with_false_positive": 0,
+    }
     time_taken = []
 
     for index, (x_path, y_path) in tqdm(enumerate(zip(test_x, test_y)), total=len(test_x)):
@@ -119,10 +154,12 @@ def run_evaluation(model_factory, config):
             image_np = np.expand_dims(image_np, axis=1).astype(np.float32) / 255.0
             save_img = cv2.cvtColor(slices[1], cv2.COLOR_GRAY2BGR)
         else:
-            img = _read_gray(x_path)
-            img = cv2.resize(img, size, interpolation=cv2.INTER_LINEAR)
-            image_np = np.expand_dims(img, axis=(0, 1)).astype(np.float32) / 255.0
-            save_img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            image_np = cv2.imread(x_path, cv2.IMREAD_COLOR)
+            if image_np is None:
+                raise RuntimeError(f"Failed to read image: {x_path}")
+            image_np = cv2.resize(image_np, size, interpolation=cv2.INTER_LINEAR)
+            save_img = image_np.copy()
+            image_np = np.transpose(image_np, (2, 0, 1)).astype(np.float32) / 255.0
 
         image = torch.from_numpy(image_np).unsqueeze(0).to(device)
 
@@ -140,16 +177,23 @@ def run_evaluation(model_factory, config):
             ignore = ignore.to(device)
 
         with torch.no_grad():
+            if device.type == "cuda":
+                torch.cuda.synchronize()
             start_time = time.time()
-            y_pred = torch.sigmoid(model(image))
+            amp_enabled = config.use_amp and device.type == "cuda"
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
+                y_pred = torch.sigmoid(model(image))
+            if device.type == "cuda":
+                torch.cuda.synchronize()
             time_taken.append(time.time() - start_time)
 
-            if ignore is not None:
-                valid_mask = (ignore < 0.5).float()
-                score = calculate_metrics(mask * valid_mask, y_pred * valid_mask, include_auc=True, auc_mask=valid_mask)
-            else:
-                score = calculate_metrics(mask, y_pred, include_auc=True)
-            metrics_score = [add(a, b) for a, b in zip(metrics_score, score)]
+            valid_mask = (ignore < 0.5).float() if ignore is not None else torch.ones_like(mask)
+            _update_diagnostics(
+                mask[0, 0].detach().cpu().numpy(),
+                y_pred[0, 0].detach().cpu().numpy(),
+                valid_mask[0, 0].detach().cpu().numpy(),
+                diagnostics,
+            )
             y_pred_vis = _process_prediction(y_pred)
 
         name = f"{Path(x_path).parent.parent.name}_{Path(x_path).name}"
@@ -158,6 +202,44 @@ def run_evaluation(model_factory, config):
         cv2.imwrite(str(config.output_dir / "joint" / name), joint)
         cv2.imwrite(str(config.output_dir / "mask" / name), y_pred_vis)
 
-    _print_score(metrics_score, len(test_x))
+    summary = metrics_from_confusion(diagnostics["counts"])
+    summary["hausdorff_pixels"] = (
+        diagnostics["hausdorff_sum"] / diagnostics["hausdorff_count"]
+        if diagnostics["hausdorff_count"]
+        else None
+    )
+    summary["hausdorff_valid_samples"] = diagnostics["hausdorff_count"]
+    summary["auc"] = diagnostics["auc_sum"] / diagnostics["auc_count"] if diagnostics["auc_count"] else None
+    summary["auc_valid_samples"] = diagnostics["auc_count"]
+    summary["positive_slices"] = diagnostics["positive_slices"]
+    summary["negative_slices"] = diagnostics["negative_slices"]
+    summary["negative_slice_false_positive_rate"] = (
+        diagnostics["negative_slices_with_false_positive"] / diagnostics["negative_slices"]
+        if diagnostics["negative_slices"]
+        else None
+    )
+    _print_score(summary)
     mean_time_taken = float(np.mean(time_taken))
-    print(f"Mean FPS: {1 / mean_time_taken if mean_time_taken > 0 else 0:.4f}")
+    summary.update(
+        {
+            "model": config.model_name,
+            "dataset_version": os.environ.get("DATASET_VERSION"),
+            "test_samples": len(test_x),
+            "mean_inference_seconds": mean_time_taken,
+            "mean_fps": 1 / mean_time_taken if mean_time_taken > 0 else 0.0,
+            "image_size": config.image_size,
+            "use_25d": config.use_25d,
+            "use_amp": config.use_amp and device.type == "cuda",
+            "seed": config.seed,
+            "checkpoint": str(checkpoint_path),
+            "python_version": platform.python_version(),
+            "torch_version": torch.__version__,
+            "cuda_version": torch.version.cuda,
+            "device": str(device),
+            "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
+        }
+    )
+    metrics_path = config.output_dir / "metrics.json"
+    metrics_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"Mean FPS: {summary['mean_fps']:.4f}")
+    print(f"Saved metrics: {metrics_path}")

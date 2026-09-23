@@ -17,7 +17,15 @@ def normalize_ct_slice(slice_array, window_center=-600, window_width=1500):
     return ((slice_array - min_val) / (max_val - min_val) * 255).astype(np.uint8)
 
 
-def extract_slices_from_volume(ct_path, mask_path, output_dir, nodule_id, min_mask_area=50):
+def extract_slices_from_volume(
+    ct_path,
+    mask_path,
+    output_dir,
+    nodule_id,
+    min_mask_area=50,
+    image_format="png",
+    jpg_quality=95,
+):
     ct_img = sitk.ReadImage(str(ct_path))
     mask_img = sitk.ReadImage(str(mask_path))
     ct_array = sitk.GetArrayFromImage(ct_img)
@@ -40,15 +48,16 @@ def extract_slices_from_volume(ct_path, mask_path, output_dir, nodule_id, min_ma
 
         ct_normalized = normalize_ct_slice(ct_array[z_idx])
         mask_uint8 = ((mask_slice > 0).astype(np.uint8) * 255)
-        filename = f"{nodule_id}_{slice_count:04d}.jpg"
-        cv2.imwrite(str(image_dir / filename), ct_normalized, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-        cv2.imwrite(str(mask_dir / filename), mask_uint8)
+        stem = f"{nodule_id}_{slice_count:04d}"
+        image_options = [int(cv2.IMWRITE_JPEG_QUALITY), jpg_quality] if image_format == "jpg" else []
+        cv2.imwrite(str(image_dir / f"{stem}.{image_format}"), ct_normalized, image_options)
+        cv2.imwrite(str(mask_dir / f"{stem}.png"), mask_uint8)
         slice_count += 1
 
     return slice_count
 
 
-def convert_luna_to_jpg(luna_root, output_root, min_mask_area=50):
+def convert_luna_to_jpg(luna_root, output_root, min_mask_area=50, image_format="png", jpg_quality=95):
     luna_root = Path(luna_root)
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -69,7 +78,15 @@ def convert_luna_to_jpg(luna_root, output_root, min_mask_area=50):
                 print(f"Skipping {ct_file.name}: missing mask {mask_file}")
                 continue
 
-            slice_count = extract_slices_from_volume(ct_file, mask_file, output_root, nodule_counter, min_mask_area)
+            slice_count = extract_slices_from_volume(
+                ct_file,
+                mask_file,
+                output_root,
+                nodule_counter,
+                min_mask_area,
+                image_format,
+                jpg_quality,
+            )
             if slice_count > 0:
                 print(f"nodule_{nodule_counter}: {slice_count} slices")
                 nodule_counter += 1
@@ -82,9 +99,17 @@ def parse_args():
     parser.add_argument("--luna-root", default="data/luna16", help="Directory containing subset0..subset9 and mask/subset0..subset9.")
     parser.add_argument("--output-root", default="data/Task03_lung", help="Output Task03_lung directory.")
     parser.add_argument("--min-mask-area", type=int, default=50, help="Minimum foreground pixels required to keep a slice.")
+    parser.add_argument("--image-format", choices=("png", "jpg"), default="png", help="CT slice format. PNG avoids JPEG artifacts.")
+    parser.add_argument("--jpg-quality", type=int, default=95, help="JPEG quality when --image-format jpg is selected.")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    convert_luna_to_jpg(args.luna_root, args.output_root, args.min_mask_area)
+    convert_luna_to_jpg(
+        args.luna_root,
+        args.output_root,
+        args.min_mask_area,
+        args.image_format,
+        args.jpg_quality,
+    )
